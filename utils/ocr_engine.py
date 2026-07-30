@@ -24,8 +24,8 @@ class BankGuardOCREngine:
         # 1. Primary OCR Engine: PaddleOCR
         try:
             from paddleocr import PaddleOCR
-            # Initialize PaddleOCR for Vietnamese & English table text recognition
-            self.paddle_ocr = PaddleOCR(use_angle_cls=True, lang='vi', show_log=False, use_gpu=use_gpu)
+            # Initialize PaddleOCR without deprecated show_log parameter
+            self.paddle_ocr = PaddleOCR(use_angle_cls=True, lang='vi', use_gpu=use_gpu)
             print("Successfully initialized PaddleOCR as primary OCR engine.")
             return
         except Exception as ex:
@@ -204,6 +204,6 @@ class BankGuardOCREngine:
 
         default_box = row_items[0]['bbox'] if row_items else [0, 0, 50, 20]
         return {
-            'data': {'Tên': name_str.strip(), 'STK': stk_str.strip(), 'Số tiền': amount_str.strip(), 'Ngân hàng': bank_str.strip()},
+            'data': {'Tên': str(name_str).strip(), 'STK': str(stk_str).strip(), 'Số tiền': str(amount_str).strip(), 'Ngân hàng': str(bank_str).strip()},
             'bboxes': {'Tên': name_bbox or default_box, 'STK': stk_bbox or default_box, 'Số tiền': amount_bbox or default_box, 'Ngân hàng': bank_bbox or default_box}
         }
