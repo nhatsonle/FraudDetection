@@ -3,7 +3,12 @@ BankGuard OCR & Layout Extraction Module
 ----------------------------------------
 Primary Engine: PaddleOCR (Best for Vietnamese text, numbers & document layouts)
 Fallback Engines: EasyOCR, PyTesseract, and Smart Layout Fallback.
+Compatible with PaddleOCR v2.x and v3.x APIs.
 """
+
+import os
+os.environ['FLAGS_use_onednn'] = '0'
+os.environ['PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK'] = 'True'
 
 import cv2
 import numpy as np
@@ -13,32 +18,44 @@ from typing import List, Dict, Any, Tuple
 
 
 class BankGuardOCREngine:
-    def __init__(self, use_gpu: bool = False):
+    def __init__(self, use_gpu: bool = None):
         self.paddle_ocr = None
         self.easyocr_reader = None
         self.has_tesseract = False
-        self._init_ocr(use_gpu)
+        self._init_ocr()
 
-    def _init_ocr(self, use_gpu: bool):
-        """Attempts to load PaddleOCR as the primary OCR engine."""
-        # 1. Primary OCR Engine: PaddleOCR
+    def _init_ocr(self):
+        """Attempts to load PaddleOCR as the primary OCR engine with v2.x/v3.x compatibility."""
+        # 1. Primary Engine: PaddleOCR
         try:
             from paddleocr import PaddleOCR
-            # Initialize PaddleOCR without deprecated show_log parameter
-            self.paddle_ocr = PaddleOCR(use_angle_cls=True, lang='vi', use_gpu=use_gpu)
+            try:
+                self.paddle_ocr = PaddleOCR(use_angle_cls=True, lang='vi', enable_mkldnn=False)
+            except TypeError:
+                try:
+                    self.paddle_ocr = PaddleOCR(lang='vi', enable_mkldnn=False)
+                except TypeError:
+                    self.paddle_ocr = PaddleOCR()
+            
             print("Successfully initialized PaddleOCR as primary OCR engine.")
             return
         except Exception as ex:
-            print(f"PaddleOCR info: {ex}. Checking secondary OCR fallback options...")
+            print(f"PaddleOCR not installed: {ex}. Checking secondary OCR fallback options...")
 
         # 2. Secondary Engine: EasyOCR
         try:
             import easyocr
-            self.easyocr_reader = easyocr.Reader(['vi', 'en'], gpu=use_gpu)
+            self.easyocr_reader = easyocr.Reader(['vi', 'en'], gpu=True)
             print("Initialized EasyOCR engine.")
             return
         except Exception:
-            pass
+            try:
+                import easyocr
+                self.easyocr_reader = easyocr.Reader(['vi', 'en'], gpu=False)
+                print("Initialized EasyOCR engine (CPU fallback).")
+                return
+            except Exception:
+                pass
 
         # 3. Tertiary Engine: PyTesseract
         try:
@@ -50,17 +67,17 @@ class BankGuardOCREngine:
             print("External OCR libraries not found. Activating BankGuard Smart Layout Fallback.")
 
     def extract_raw_ocr(self, image: np.ndarray) -> List[Dict[str, Any]]:
-        """
-        Runs OCR on the given BGR image and returns detected text items with bounding boxes.
-        Returns list of dicts: [{'text': str, 'bbox': [x, y, w, h], 'confidence': float}]
-        """
         results = []
 
         # 1. Try Primary Engine: PaddleOCR
         if self.paddle_ocr is not None:
             try:
                 rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                ocr_res = self.paddle_ocr.ocr(rgb, cls=True)
+                try:
+                    ocr_res = self.paddle_ocr.ocr(rgb, cls=True)
+                except Exception:
+                    ocr_res = self.paddle_ocr.ocr(rgb)
+
                 if ocr_res and ocr_res[0]:
                     for line in ocr_res[0]:
                         bbox_pts, (text, score) = line
@@ -77,7 +94,7 @@ class BankGuardOCREngine:
                 if results:
                     return results
             except Exception as ex:
-                print(f"PaddleOCR run error: {ex}")
+                print(f"PaddleOCR execution error: {ex}")
 
         # 2. Try Secondary Engine: EasyOCR
         if self.easyocr_reader is not None:
@@ -125,19 +142,28 @@ class BankGuardOCREngine:
             {"Tên": "TRAN THI BINH", "STK": "9988776655", "Số tiền": "500,000,000 VND", "Ngân hàng": "TCB"},
             {"Tên": "LE HOANG CUONG", "STK": "0071999999", "Số tiền": "35,000,000 VND", "Ngân hàng": "BIDV"},
             {"Tên": "HOANG VAN PHUC", "STK": "2200155999", "Số tiền": "85,000,000 VND", "Ngân hàng": "AGRIBANK"},
+            {"Tên": "HOANG THI EM", "STK": "3300445566", "Số tiền": "12,500,000 VND", "Ngân hàng": "CTG"},
+            {"Tên": "DANG VAN PHONG", "STK": "5544332211", "Số tiền": "45,000,000 VND", "Ngân hàng": "MB"},
+            {"Tên": "BUI THI GIANG", "STK": "6677889900", "Số tiền": "1,500,000,000 VND", "Ngân hàng": "STB"},
+            {"Tên": "NGO QUAN HUNG", "STK": "1122334455", "Số tiền": "95,000,000 VND", "Ngân hàng": "VPB"},
+            {"Tên": "LE THI HONG", "STK": "9900112233", "Số tiền": "200,000,000 VND", "Ngân hàng": "TPB"},
+            {"Tên": "VUONG QUOC KHANH", "STK": "4455667788", "Số tiền": "30,000,000 VND", "Ngân hàng": "ACB"},
+            {"Tên": "LY THI LAM", "STK": "7788990011", "Số tiền": "65,000,000 VND", "Ngân hàng": "VCB"},
+            {"Tên": "PHAN THI OANH", "STK": "1231231234", "Số tiền": "42,000,000 VND", "Ngân hàng": "BIDV"},
+            {"Tên": "QUACH VAN PHAT", "STK": "3213219999", "Số tiền": "88,000,000 VND", "Ngân hàng": "AGRIBANK"},
             {"Tên": "VO VAN GHOST", "STK": "8888999900", "Số tiền": "250,000,000 VND", "Ngân hàng": "MBBANK"},
         ]
         h, w = image.shape[:2]
-        y_start, row_height = 140, 60
+        y_start, row_height = 120, 50
         num_rows = min(len(demo_rows), max(1, (h - y_start) // row_height))
 
         for i in range(num_rows):
             row_data = demo_rows[i]
             y = y_start + i * row_height
-            results.append({'text': row_data["Tên"], 'bbox': [30, y + 15, 250, 30], 'confidence': 0.99})
-            results.append({'text': row_data["STK"], 'bbox': [300, y + 15, 200, 30], 'confidence': 0.99})
-            results.append({'text': row_data["Số tiền"], 'bbox': [520, y + 15, 210, 30], 'confidence': 0.99})
-            results.append({'text': row_data["Ngân hàng"], 'bbox': [750, y + 15, 200, 30], 'confidence': 0.99})
+            results.append({'text': row_data["Tên"], 'bbox': [30, y + 12, 240, 25], 'confidence': 0.99})
+            results.append({'text': row_data["STK"], 'bbox': [280, y + 12, 200, 25], 'confidence': 0.99})
+            results.append({'text': row_data["Số tiền"], 'bbox': [500, y + 12, 230, 25], 'confidence': 0.99})
+            results.append({'text': row_data["Ngân hàng"], 'bbox': [750, y + 12, 200, 25], 'confidence': 0.99})
         return results
 
     def extract_structured_table(self, image: np.ndarray, raw_ocr_items: List[Dict[str, Any]] = None) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
@@ -187,7 +213,7 @@ class BankGuardOCREngine:
                 stk_str, stk_bbox = txt, box
             elif (re.search(r'\d', txt) and ('.' in txt or ',' in txt or 'VND' in txt.upper() or 'Đ' in txt.upper())) and not amount_str:
                 amount_str, amount_bbox = txt, box
-            elif any(b in txt.upper() for b in ['VCB', 'TCB', 'BIDV', 'AGRIBANK', 'CTG', 'MB', 'ACB', 'VPB', 'TPB']):
+            elif any(b in txt.upper() for b in ['VCB', 'TCB', 'BIDV', 'AGRIBANK', 'CTG', 'MB', 'ACB', 'VPB', 'TPB', 'STB']):
                 bank_str, bank_bbox = txt, box
             else:
                 name_parts.append((txt, box))

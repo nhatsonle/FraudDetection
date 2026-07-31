@@ -1,36 +1,67 @@
 """
 BankGuard Preprocessor Module
 ------------------------------
-Handles Image Pre-processing (Deskewing, Contrast Enhancement, Denoising)
-and Document Image Forensics (Error Level Analysis - ELA for Tampering Detection).
+Handles Image Pre-processing, EXIF Transpose, Auto 4-Way Orientation Detection,
+Deskewing, Contrast Enhancement, and Error Level Analysis (ELA).
 """
 
 import cv2
 import numpy as np
-from PIL import Image, ImageChops, ImageEnhance, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageEnhance, ImageDraw, ImageFont, ImageOps
 import io
 import unicodedata
 from typing import Tuple, Union
 
 
 def load_image(image_input: Union[str, bytes, Image.Image, np.ndarray]) -> np.ndarray:
-    """Converts various input image types to a standard OpenCV BGR numpy array."""
+    """
+    Converts input image to a standard OpenCV BGR numpy array,
+    automatically applying EXIF orientation transpose for smartphone/scan photos.
+    """
     if isinstance(image_input, str):
-        img = cv2.imread(image_input)
-        if img is None:
-            raise ValueError(f"Could not read image from path: {image_input}")
-        return img
+        pil_img = Image.open(image_input)
+        pil_img = ImageOps.exif_transpose(pil_img)
+        return cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2BGR)
     elif isinstance(image_input, bytes):
-        nparr = np.frombuffer(image_input, np.uint8)
-        return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        pil_img = Image.open(io.BytesIO(image_input))
+        pil_img = ImageOps.exif_transpose(pil_img)
+        return cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2BGR)
     elif isinstance(image_input, Image.Image):
-        return cv2.cvtColor(np.array(image_input), cv2.COLOR_RGB2BGR)
+        pil_img = ImageOps.exif_transpose(image_input)
+        return cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2BGR)
     elif isinstance(image_input, np.ndarray):
         if len(image_input.shape) == 2:
             return cv2.cvtColor(image_input, cv2.COLOR_GRAY2BGR)
         return image_input.copy()
     else:
         raise TypeError(f"Unsupported image input type: {type(image_input)}")
+
+
+def auto_orient_upright(image: np.ndarray, ocr_engine) -> Tuple[np.ndarray, int]:
+    """
+    Detects if the image is rotated 90, 180, or 270 degrees and rotates it upright.
+    Returns: (upright_image, detected_angle)
+    """
+    rotations = [
+        (0, image),
+        (90, cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)),
+        (180, cv2.rotate(image, cv2.ROTATE_180)),
+        (270, cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)),
+    ]
+
+    best_angle = 0
+    best_img = image
+    max_headers = -1
+
+    for angle, rot_img in rotations:
+        raw_ocr = ocr_engine.extract_raw_ocr(rot_img)
+        header_count = sum(1 for it in raw_ocr if any(h in it['text'].lower() for h in ['stk', 'tên', 'ngân hàng', 'số tiền', 'amount', 'bank']))
+        if header_count > max_headers:
+            max_headers = header_count
+            best_angle = angle
+            best_img = rot_img
+
+    return best_img, best_angle
 
 
 def deskew_image(image: np.ndarray) -> np.ndarray:
@@ -69,14 +100,14 @@ def preprocess_for_ocr(image: np.ndarray) -> np.ndarray:
 def detect_ela(image_input: Union[str, bytes, Image.Image, np.ndarray], quality: int = 90) -> Tuple[Image.Image, Image.Image, float, bool]:
     """Performs Error Level Analysis (ELA) to detect image tampering."""
     if isinstance(image_input, str):
-        orig_pil = Image.open(image_input).convert('RGB')
+        orig_pil = ImageOps.exif_transpose(Image.open(image_input)).convert('RGB')
     elif isinstance(image_input, bytes):
-        orig_pil = Image.open(io.BytesIO(image_input)).convert('RGB')
+        orig_pil = ImageOps.exif_transpose(Image.open(io.BytesIO(image_input))).convert('RGB')
     elif isinstance(image_input, np.ndarray):
         rgb = cv2.cvtColor(image_input, cv2.COLOR_BGR2RGB)
         orig_pil = Image.fromarray(rgb)
     elif isinstance(image_input, Image.Image):
-        orig_pil = image_input.convert('RGB')
+        orig_pil = ImageOps.exif_transpose(image_input).convert('RGB')
     else:
         raise TypeError("Invalid image type for ELA")
 
@@ -108,49 +139,36 @@ def detect_ela(image_input: Union[str, bytes, Image.Image, np.ndarray], quality:
     return orig_pil, heatmap_pil, tamper_score, is_tampered
 
 
-def _to_ascii_label(text: str) -> str:
-    """Converts Vietnamese unicode text to clean ASCII so OpenCV putText doesn't display '??'."""
-    if not text:
-        return ""
-    nfd_form = unicodedata.normalize('NFD', text)
-    no_accents = ''.join([c for c in nfd_form if unicodedata.category(c) != 'MN'])
-    return no_accents.replace('đ', 'd').replace('Đ', 'D').strip().upper()
-
-
 def draw_bounding_boxes_on_image(image: np.ndarray, boxes_with_labels: list) -> np.ndarray:
-    """Draws colored bounding boxes with clean ASCII labels over an image."""
-    annotated = image.copy()
+    """Renders Bounding Boxes with full Unicode Vietnamese text support using PIL."""
+    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(rgb_image)
+    draw = ImageDraw.Draw(pil_img)
+
+    font_size = max(14, int(image.shape[1] / 70))
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
+    except IOError:
+        font = ImageFont.load_default()
+
     for item in boxes_with_labels:
         x, y, w, h = item['bbox']
-        color = item.get('color', (0, 0, 255) if item.get('is_fraud', False) else (0, 255, 0))
-        thickness = 3 if item.get('is_fraud', False) else 1
+        is_fraud = item.get('is_fraud', False)
+        color = (239, 68, 68) if is_fraud else (16, 185, 129)
+        outline_width = max(2, int(image.shape[1] / 300))
         
-        cv2.rectangle(annotated, (x, y), (x + w, y + h), color, thickness)
+        draw.rectangle([x, y, x + w, y + h], outline=color, width=outline_width)
         
         raw_label = item.get('label', '')
         if raw_label:
-            # Convert label to clean ASCII to avoid OpenCV ?? encoding bug
-            clean_label = _to_ascii_label(raw_label)
-            font_scale = 0.5
-            font_thick = 1
-            (text_w, text_h), baseline = cv2.getTextSize(clean_label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
+            bbox = draw.textbbox((0, 0), raw_label, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
             
-            cv2.rectangle(
-                annotated, 
-                (x, max(0, y - text_h - 6)), 
-                (x + text_w + 4, max(text_h + 6, y)), 
-                color, 
-                -1
-            )
-            cv2.putText(
-                annotated, 
-                clean_label, 
-                (x + 2, max(text_h, y - 4)), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                font_scale, 
-                (255, 255, 255), 
-                font_thick, 
-                cv2.LINE_AA
-            )
+            badge_y1 = max(0, y - text_h - 8)
+            badge_y2 = max(text_h + 8, y)
             
-    return annotated
+            draw.rectangle([x, badge_y1, x + text_w + 10, badge_y2], fill=color)
+            draw.text((x + 5, badge_y1 + 2), raw_label, fill=(255, 255, 255), font=font)
+            
+    return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)

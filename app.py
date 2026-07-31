@@ -10,7 +10,7 @@ import cv2
 import io
 import os
 
-from utils.preprocessor import load_image, deskew_image, preprocess_for_ocr, detect_ela, draw_bounding_boxes_on_image
+from utils.preprocessor import load_image, auto_orient_upright, deskew_image, preprocess_for_ocr, detect_ela, draw_bounding_boxes_on_image
 from utils.ocr_engine import BankGuardOCREngine
 from utils.matcher import AntiFraudMatcher
 import generate_demo_data
@@ -41,44 +41,51 @@ st.markdown("""
     .metric-value-fraud { color: #f87171; font-size: 32px; font-weight: 700; }
     .metric-label { color: #94a3b8; font-size: 13px; font-weight: 600; }
     
-    /* Custom HTML Table Styling for Tunnel Reliability */
-    .styled-table-container {
+    .table-container {
+        width: 100%;
         overflow-x: auto;
-        border-radius: 8px;
         border: 1px solid #334155;
+        border-radius: 8px;
+        margin-top: 10px;
     }
-    .custom-table {
+    table.bankguard-table {
         width: 100%;
         border-collapse: collapse;
-        color: #f8fafc;
-        font-family: sans-serif;
+        color: #f1f5f9;
+        font-family: system-ui, -apple-system, sans-serif;
         font-size: 13px;
+        background-color: #0f172a;
     }
-    .custom-table th {
+    table.bankguard-table th {
         background-color: #1e293b;
         color: #38bdf8;
-        padding: 10px 12px;
+        padding: 10px;
         text-align: left;
         border-bottom: 2px solid #334155;
+        white-space: nowrap;
     }
-    .custom-table td {
-        padding: 10px 12px;
+    table.bankguard-table td {
+        padding: 10px;
         border-bottom: 1px solid #1e293b;
+        white-space: nowrap;
     }
-    .status-badge-matched {
+    table.bankguard-table tr:hover {
+        background-color: #1e293b;
+    }
+    .badge-matched-cell {
         background-color: #065f46;
         color: #34d399;
         padding: 4px 8px;
         border-radius: 4px;
-        font-weight: bold;
+        font-weight: 700;
         font-size: 11px;
     }
-    .status-badge-fraud {
+    .badge-fraud-cell {
         background-color: #991b1b;
         color: #f87171;
         padding: 4px 8px;
         border-radius: 4px;
-        font-weight: bold;
+        font-weight: 700;
         font-size: 11px;
     }
 </style>
@@ -87,7 +94,7 @@ st.markdown("""
 
 @st.cache_resource
 def get_ocr_engine():
-    return BankGuardOCREngine(use_gpu=False)
+    return BankGuardOCREngine(use_gpu=None)
 
 
 def main():
@@ -127,8 +134,9 @@ def main():
     df_csv = pd.read_csv(io.BytesIO(csv_bytes), dtype=str)
     orig_bgr = load_image(img_bytes)
 
-    with st.spinner("🔍 Đang chạy Preprocessing, Deskew & OCR Layout Extraction..."):
-        deskewed_bgr = deskew_image(orig_bgr)
+    with st.spinner("🔍 Đang chạy EXIF Transpose, Auto 4-Way Orientation & OCR Extraction..."):
+        oriented_bgr, angle_detected = auto_orient_upright(orig_bgr, ocr_engine)
+        deskewed_bgr = deskew_image(oriented_bgr)
         df_paper, cell_bboxes = ocr_engine.extract_structured_table(deskewed_bgr)
 
     df_reconciled, summary = matcher.reconcile(df_csv, df_paper)
@@ -180,7 +188,7 @@ def main():
 
         tab_img, tab_ela = st.tabs(["🖼️ Báo Xấu Bounding Box", "🔥 Heatmap ELA Tamper"])
         with tab_img:
-            st.image(annotated_rgb, caption="Bản Scan gốc với Bounding Box Màu Đỏ tại vị trí Sai lệch", use_container_width=True)
+            st.image(annotated_rgb, caption=f"Bản Scan gốc (Đã xoay {angle_detected}°) với Bounding Box Màu Đỏ tại vị trí Sai lệch", use_container_width=True)
         with tab_ela:
             st.image(ela_heatmap, caption="ELA Heatmap - Mức nén bất thường / Photoshop", use_container_width=True)
 
@@ -198,28 +206,19 @@ def main():
         display_df['Amount_CSV'] = display_df['Amount_CSV'].apply(lambda x: f"{int(x):,.0f} đ" if str(x).isdigit() and int(x) > 0 else "-")
         display_df['Amount_Paper'] = display_df['Amount_Paper'].apply(lambda x: f"{int(x):,.0f} đ" if str(x).isdigit() and int(x) > 0 else "-")
 
-        # Custom HTML Table Rendering to avoid Tunnel JS Chunk Loading Errors
-        html_table = "<div class='styled-table-container'><table class='custom-table'>"
-        html_table += "<thead><tr><th>Tên CSV</th><th>STK CSV</th><th>Số tiền CSV</th><th>Ngân hàng</th><th>Tên Giấy</th><th>STK Giấy</th><th>Số tiền Giấy</th><th>Trạng thái</th></tr></thead><tbody>"
+        html_rows = []
+        html_rows.append("<div class='table-container'><table class='bankguard-table'>")
+        html_rows.append("<thead><tr><th>Tên CSV</th><th>STK CSV</th><th>Số tiền CSV</th><th>Ngân hàng</th><th>Tên Giấy</th><th>STK Giấy</th><th>Số tiền Giấy</th><th>Trạng thái</th></tr></thead><tbody>")
         
         for _, row in display_df.iterrows():
             st_val = str(row['Fraud_Status'])
-            badge_cls = "status-badge-fraud" if "FRAUD" in st_val else "status-badge-matched"
-            html_table += f"""
-            <tr>
-                <td>{row['Tên_CSV']}</td>
-                <td>{row['STK_CSV']}</td>
-                <td>{row['Amount_CSV']}</td>
-                <td>{row['Bank_CSV']}</td>
-                <td>{row['Tên_Paper']}</td>
-                <td>{row['STK_Paper']}</td>
-                <td>{row['Amount_Paper']}</td>
-                <td><span class='{badge_cls}'>{st_val}</span></td>
-            </tr>
-            """
-        html_table += "</tbody></table></div>"
+            badge_cls = "badge-fraud-cell" if "FRAUD" in st_val else "badge-matched-cell"
+            html_rows.append(f"<tr><td>{row['Tên_CSV']}</td><td>{row['STK_CSV']}</td><td>{row['Amount_CSV']}</td><td>{row['Bank_CSV']}</td><td>{row['Tên_Paper']}</td><td>{row['STK_Paper']}</td><td>{row['Amount_Paper']}</td><td><span class='{badge_cls}'>{st_val}</span></td></tr>")
         
-        st.markdown(html_table, unsafe_allow_html=True)
+        html_rows.append("</tbody></table></div>")
+        clean_html = "".join(html_rows)
+        
+        st.markdown(clean_html, unsafe_allow_html=True)
 
     # 3. FRAUD AUDIT LOG & EXPORT REPORT
     st.markdown("---")
